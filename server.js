@@ -36,7 +36,7 @@ function fetchViaWorker(url) {
 
 // Sniff: goto worker URL directly, intercept admin-ajax
 app.get('/sniff', async (req, res) => {
-  const { epUrl } = req.query;
+  const { epUrl, postId } = req.query;
   if (!epUrl) return res.status(400).json({ error: 'epUrl required' });
 
   let page = null;
@@ -91,6 +91,10 @@ app.get('/sniff', async (req, res) => {
     await new Promise(r => setTimeout(r, 2000));
 
     // Inject jQuery if not loaded, then manually trigger AJAX
+    // Extract postId from HTML if not provided
+    const pid = postId || epHtml.match(/a:\s*['"](\d+)['"]/)?.[1] || '';
+    captured.postId = pid;
+
     const ajaxResult = await page.evaluate(async (pid, workerUrl) => {
       // Inject jQuery if missing
       if (typeof jQuery === 'undefined') {
@@ -112,7 +116,7 @@ app.get('/sniff', async (req, res) => {
         ).fail((xhr) => resolve({ error: xhr.status + ' ' + xhr.responseText?.slice(0, 100) }));
         setTimeout(() => resolve({ timeout: true }), 8000);
       });
-    }, postId, WORKER_URL).catch(e => ({ error: e.message }));
+    }, pid, WORKER_URL).catch(e => ({ error: e.message }));
 
     captured.ajaxResult = ajaxResult;
 
