@@ -53,12 +53,17 @@ app.get('/sniff', async (req, res) => {
         captured.requests.push({ url, method: r.method(), postData: r.postData() });
       }
       if (['image', 'font', 'stylesheet'].includes(r.resourceType())) return r.abort();
+      // Route ALL hentaimama requests via worker
+      if (url.includes('hentaimama.io') || url.includes('admin-ajax')) {
+        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
+        return r.continue({ url: workerUrl }).catch(() => r.abort());
+      }
       r.continue().catch(() => r.abort());
     });
 
     page.on('response', async response => {
       const url = response.url();
-      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php')) {
+      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php') || url.includes('workers.dev')) {
         try {
           const text = await response.text();
           captured.responses.push({ url, status: response.status(), body: text.slice(0, 1000) });
