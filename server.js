@@ -34,13 +34,13 @@ function fetchViaWorker(url) {
   });
 }
 
-// Sniff endpoint — opens page and captures all interesting network traffic
+// Sniff: goto worker URL directly, intercept admin-ajax
 app.get('/sniff', async (req, res) => {
   const { epUrl } = req.query;
   if (!epUrl) return res.status(400).json({ error: 'epUrl required' });
 
   let page = null;
-  const captured = { requests: [], responses: [] };
+  const captured = { requests: [], responses: [], pageTitle: '' };
 
   try {
     const b = await getBrowser();
@@ -49,30 +49,44 @@ app.get('/sniff', async (req, res) => {
 
     page.on('request', r => {
       const url = r.url();
-      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php')) {
-        captured.requests.push({ url, method: r.method(), postData: r.postData() });
+      const type = r.resourceType();
+      if (['image', 'font', 'stylesheet', 'media'].includes(type)) return r.abort();
+      if (/juicyads|adserver|magsrv|twinrd|disqus/.test(url)) return r.abort();
+
+      // Log interesting requests
+      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider')) {
+        captured.requests.push({ url: url.slice(0, 200), method: r.method(), postData: r.postData() });
       }
-      if (['image', 'font', 'stylesheet'].includes(r.resourceType())) return r.abort();
-      // Route ALL hentaimama requests via worker
-      if (url.includes('hentaimama.io') || url.includes('admin-ajax')) {
-        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
-        return r.continue({ url: workerUrl }).catch(() => r.abort());
+
+      // Route hentaimama requests via worker
+      if (url.includes('hentaimama.io')) {
+        const wUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
+        return r.continue({ url: wUrl }).catch(() => r.abort());
       }
       r.continue().catch(() => r.abort());
     });
 
     page.on('response', async response => {
       const url = response.url();
-      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php') || url.includes('workers.dev')) {
+      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider')) {
         try {
           const text = await response.text();
-          captured.responses.push({ url, status: response.status(), body: text.slice(0, 1000) });
+          captured.responses.push({ url: url.slice(0, 150), status: response.status(), body: text.slice(0, 500) });
         } catch(e) {}
       }
     });
 
-    await page.goto(epUrl, { waitUntil: 'networkidle2', timeout: 25000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 5000));
+    // goto via worker URL so hentaimama.io loads properly
+    const workerEpUrl = `${WORKER_URL}?url=${encodeURIComponent(epUrl.replace('https://', 'http://'))}`;
+    await page.goto(workerEpUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(e => {
+      captured.gotoError = e.message;
+    });
+
+    captured.pageTitle = await page.title().catch(() => '');
+    captured.pageUrl = page.url();
+
+    // Wait for AJAX
+    await new Promise(r => setTimeout(r, 6000));
 
     res.json(captured);
   } catch(e) {
