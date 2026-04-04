@@ -84,12 +84,9 @@ app.get('/sniff', async (req, res) => {
     captured.htmlLength = epHtml.length;
     const htmlWithBase = epHtml.replace('<head>', '<head><base href="http://hentaimama.io/">');
 
-    // Use evaluate to write HTML directly — avoids setContent timeout issues
-    await page.evaluate((html) => {
-      document.open(); document.write(html); document.close();
-    }, htmlWithBase).catch(() => {});
-    // Give page time to stabilize after setContent
-    await new Promise(r => setTimeout(r, 1000));
+    // Use setContent with long timeout — ignore timeout errors, page still loads
+    await page.setContent(htmlWithBase, { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2000));
 
     captured.pageTitle = await page.title().catch(() => '');
     captured.pageUrl = page.url();
