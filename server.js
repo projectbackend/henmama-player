@@ -87,8 +87,37 @@ app.get('/sniff', async (req, res) => {
     captured.pageTitle = await page.title().catch(() => '');
     captured.pageUrl = page.url();
 
-    // Wait for AJAX
-    await new Promise(r => setTimeout(r, 6000));
+    // Wait for scripts to load
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Inject jQuery if not loaded, then manually trigger AJAX
+    const ajaxResult = await page.evaluate(async (pid, workerUrl) => {
+      // Inject jQuery if missing
+      if (typeof jQuery === 'undefined') {
+        await new Promise((resolve) => {
+          const s = document.createElement('script');
+          s.src = 'https://code.jquery.com/jquery-3.7.1.min.js';
+          s.onload = resolve;
+          s.onerror = resolve;
+          document.head.appendChild(s);
+        });
+      }
+      if (typeof jQuery === 'undefined') return { error: 'jQuery not available' };
+
+      return new Promise((resolve) => {
+        jQuery.post(
+          workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'),
+          { action: 'get_player_contents', a: pid },
+          (data) => resolve({ data: typeof data === 'string' ? data : JSON.stringify(data) })
+        ).fail((xhr) => resolve({ error: xhr.status + ' ' + xhr.responseText?.slice(0, 100) }));
+        setTimeout(() => resolve({ timeout: true }), 8000);
+      });
+    }, postId, WORKER_URL).catch(e => ({ error: e.message }));
+
+    captured.ajaxResult = ajaxResult;
+
+    // Wait for any auto-fired AJAX
+    await new Promise(r => setTimeout(r, 3000));
 
     res.json(captured);
   } catch(e) {
