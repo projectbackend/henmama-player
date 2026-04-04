@@ -76,10 +76,12 @@ app.get('/sniff', async (req, res) => {
       }
     });
 
-    // goto via worker URL so hentaimama.io loads properly
-    const workerEpUrl = `${WORKER_URL}?url=${encodeURIComponent(epUrl.replace('https://', 'http://'))}`;
-    await page.goto(workerEpUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(e => {
-      captured.gotoError = e.message;
+    // Fetch HTML via worker, inject <base> tag so relative URLs resolve to hentaimama.io
+    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
+    captured.htmlLength = epHtml.length;
+    const htmlWithBase = epHtml.replace('<head>', '<head><base href="http://hentaimama.io/">');
+    await page.setContent(htmlWithBase, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(e => {
+      captured.setContentError = e.message;
     });
 
     captured.pageTitle = await page.title().catch(() => '');
