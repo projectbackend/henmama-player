@@ -34,50 +34,76 @@ function fetchViaWorker(url) {
   });
 }
 
+// Sniff endpoint — opens page and captures all interesting network traffic
+app.get('/sniff', async (req, res) => {
+  const { epUrl } = req.query;
+  if (!epUrl) return res.status(400).json({ error: 'epUrl required' });
+
+  let page = null;
+  const captured = { requests: [], responses: [] };
+
+  try {
+    const b = await getBrowser();
+    page = await b.newPage();
+    await page.setRequestInterception(true);
+
+    page.on('request', r => {
+      const url = r.url();
+      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php')) {
+        captured.requests.push({ url, method: r.method(), postData: r.postData() });
+      }
+      if (['image', 'font', 'stylesheet'].includes(r.resourceType())) return r.abort();
+      r.continue().catch(() => r.abort());
+    });
+
+    page.on('response', async response => {
+      const url = response.url();
+      if (url.includes('admin-ajax') || url.includes('.mp4') || url.includes('gdvid') || url.includes('javprovider') || url.includes('new2.php')) {
+        try {
+          const text = await response.text();
+          captured.responses.push({ url, status: response.status(), body: text.slice(0, 1000) });
+        } catch(e) {}
+      }
+    });
+
+    await page.goto(epUrl, { waitUntil: 'networkidle2', timeout: 25000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 5000));
+
+    res.json(captured);
+  } catch(e) {
+    res.status(500).json({ error: e.message, captured });
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+});
+
 app.get('/player', async (req, res) => {
   const { postId, epUrl } = req.query;
   if (!postId || !epUrl) return res.status(400).json({ error: 'postId and epUrl required' });
 
   let page = null;
   try {
-    // Fetch episode HTML via Worker (bypasses SSL/IP issues)
     const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
-
     const b = await getBrowser();
     page = await b.newPage();
-
     await page.setRequestInterception(true);
     let playerData = null;
 
     page.on('request', intercepted => {
       const url = intercepted.url();
       const type = intercepted.resourceType();
-
-      // Block heavy/irrelevant resources
       if (['image', 'font', 'media', 'stylesheet'].includes(type)) return intercepted.abort();
       if (url.startsWith('data:') || url.startsWith('blob:')) return intercepted.continue();
-
-      // Block ads
       if (/juicyads|adserver|magsrv|twinrd|disqus|googlesyndication/.test(url)) return intercepted.abort();
-
-      // Route admin-ajax through Worker so it reaches hentaimama.io
-      if (url.includes('admin-ajax')) {
+      if (url.includes('admin-ajax') || url.includes('hentaimama.io')) {
         const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
         return intercepted.continue({ url: workerUrl }).catch(() => intercepted.abort());
       }
-
-      // Route all hentaimama requests through Worker
-      if (url.includes('hentaimama.io')) {
-        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
-        return intercepted.continue({ url: workerUrl }).catch(() => intercepted.abort());
-      }
-
       intercepted.continue().catch(() => intercepted.abort());
     });
 
     page.on('response', async response => {
       const url = response.url();
-      // Capture admin-ajax response (comes via worker URL)
       if (!url.includes('admin-ajax') && !url.includes('workers.dev')) return;
       try {
         const text = await response.text();
@@ -89,32 +115,22 @@ app.get('/player', async (req, res) => {
       } catch(e) {}
     });
 
-    // Load HTML with hentaimama.io as base URL so relative URLs resolve correctly
     await page.setContent(epHtml, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-
-    // Manually set document.URL so WordPress scripts think they're on the real page
-    await page.evaluate((url) => {
-      try { history.replaceState({}, '', url); } catch(e) {}
-    }, epUrl).catch(() => {});
-
-    // Wait for jQuery AJAX to fire automatically
+    await page.evaluate((url) => { try { history.replaceState({}, '', url); } catch(e) {} }, epUrl).catch(() => {});
     await new Promise(r => setTimeout(r, 4000));
 
     if (!playerData) {
-      console.log(`[player] No auto AJAX, trying manual trigger for ${postId}`);
       try {
         const result = await page.evaluate(async (pid, workerUrl) => {
-          // Try jQuery if available
           if (typeof jQuery !== 'undefined') {
             return new Promise((resolve) => {
-              jQuery.post(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'), 
+              jQuery.post(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'),
                 { action: 'get_player_contents', a: pid },
                 (data) => resolve(data)
               );
               setTimeout(() => resolve(null), 5000);
             });
           }
-          // Fallback: fetch directly
           const r = await fetch(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
@@ -160,55 +176,6 @@ app.get('/player', async (req, res) => {
   }
 });
 
-app.get('/debug', async (req, res) => {
-  const { postId, epUrl } = req.query;
-  if (!postId || !epUrl) return res.status(400).json({ error: 'postId and epUrl required' });
-
-  try {
-    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
-    
-    // Test AJAX directly via worker
-    const ajaxUrl = `${WORKER_URL}?url=${encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php')}`;
-    const result = await new Promise((resolve, reject) => {
-      const https = require('https');
-      const body = `action=get_player_contents&a=${postId}`;
-      const urlObj = new URL(ajaxUrl);
-      const options = {
-        hostname: urlObj.hostname,
-        path: urlObj.pathname + urlObj.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Content-Length': Buffer.byteLength(body),
-          'X-Requested-With': 'XMLHttpRequest',
-          'Referer': epUrl,
-          'Origin': 'http://hentaimama.io',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-      };
-      const req2 = https.request(options, r => {
-        let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d));
-      });
-      req2.on('error', reject);
-      req2.write(body);
-      req2.end();
-    });
-
-    // Extract nonce from HTML
-    const nonceMatch = epHtml.match(/"nonce"\s*:\s*"([a-f0-9]+)"/g);
-    const scriptMatch = epHtml.match(/a:'(\d+)'/);
-    
-    res.json({
-      ajaxResult: result.slice(0, 200),
-      nonces: nonceMatch,
-      postIdInHtml: scriptMatch?.[1],
-      htmlLength: epHtml.length
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
+app.get('/health', (_, res) => res.json({ ok: true }));
 app.listen(PORT, () => console.log(`Player service on port ${PORT}`));
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
