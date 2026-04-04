@@ -40,29 +40,45 @@ app.get('/player', async (req, res) => {
 
   let page = null;
   try {
+    // Fetch episode HTML via Worker (bypasses SSL/IP issues)
+    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
+
     const b = await getBrowser();
     page = await b.newPage();
 
-    // Route only non-essential resources via Worker to save bandwidth
     await page.setRequestInterception(true);
     let playerData = null;
 
-    page.on('request', r => {
-      const url = r.url();
-      const type = r.resourceType();
-      // Block heavy resources
-      if (['image', 'font', 'media', 'stylesheet'].includes(type)) return r.abort();
-      if (url.startsWith('data:') || url.startsWith('about:') || url.startsWith('blob:')) return r.continue();
-      // Let admin-ajax go directly — routing via Worker breaks WordPress session
-      if (url.includes('admin-ajax')) return r.continue();
-      // Block ads/trackers
-      if (url.includes('juicyads') || url.includes('adserver') || url.includes('magsrv') || url.includes('twinrd')) return r.abort();
-      r.continue();
+    page.on('request', intercepted => {
+      const url = intercepted.url();
+      const type = intercepted.resourceType();
+
+      // Block heavy/irrelevant resources
+      if (['image', 'font', 'media', 'stylesheet'].includes(type)) return intercepted.abort();
+      if (url.startsWith('data:') || url.startsWith('blob:')) return intercepted.continue();
+
+      // Block ads
+      if (/juicyads|adserver|magsrv|twinrd|disqus|googlesyndication/.test(url)) return intercepted.abort();
+
+      // Route admin-ajax through Worker so it reaches hentaimama.io
+      if (url.includes('admin-ajax')) {
+        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
+        return intercepted.continue({ url: workerUrl }).catch(() => intercepted.abort());
+      }
+
+      // Route all hentaimama requests through Worker
+      if (url.includes('hentaimama.io')) {
+        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
+        return intercepted.continue({ url: workerUrl }).catch(() => intercepted.abort());
+      }
+
+      intercepted.continue().catch(() => intercepted.abort());
     });
 
     page.on('response', async response => {
       const url = response.url();
-      if (!url.includes('admin-ajax')) return;
+      // Capture admin-ajax response (comes via worker URL)
+      if (!url.includes('admin-ajax') && !url.includes('workers.dev')) return;
       try {
         const text = await response.text();
         const parsed = JSON.parse(text);
@@ -73,22 +89,47 @@ app.get('/player', async (req, res) => {
       } catch(e) {}
     });
 
-    // Navigate directly to the episode page so WordPress session/cookies work properly
-    await page.goto(epUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    // Load HTML with hentaimama.io as base URL so relative URLs resolve correctly
+    await page.setContent(epHtml, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
+    // Manually set document.URL so WordPress scripts think they're on the real page
+    await page.evaluate((url) => {
+      try { history.replaceState({}, '', url); } catch(e) {}
+    }, epUrl).catch(() => {});
 
     // Wait for jQuery AJAX to fire automatically
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 4000));
 
     if (!playerData) {
-      console.log(`[player] No data after page load, trying manual trigger for ${postId}`);
+      console.log(`[player] No auto AJAX, trying manual trigger for ${postId}`);
       try {
-        await page.evaluate((pid) => {
+        const result = await page.evaluate(async (pid, workerUrl) => {
+          // Try jQuery if available
           if (typeof jQuery !== 'undefined') {
-            jQuery.post('/wp-admin/admin-ajax.php', { action: 'get_player_contents', a: pid });
+            return new Promise((resolve) => {
+              jQuery.post(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'), 
+                { action: 'get_player_contents', a: pid },
+                (data) => resolve(data)
+              );
+              setTimeout(() => resolve(null), 5000);
+            });
           }
-        }, postId);
-        await new Promise(r => setTimeout(r, 4000));
-      } catch(e) {}
+          // Fallback: fetch directly
+          const r = await fetch(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+            body: `action=get_player_contents&a=${pid}`
+          });
+          return r.text();
+        }, postId, WORKER_URL);
+
+        if (result) {
+          try {
+            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            if (Array.isArray(parsed) && parsed.length > 0) playerData = parsed;
+          } catch(e) {}
+        }
+      } catch(e) { console.log('[player] Manual trigger error:', e.message); }
     }
 
     if (!playerData) return res.status(404).json({ error: 'No player data' });
