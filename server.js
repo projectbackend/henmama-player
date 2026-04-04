@@ -85,7 +85,6 @@ app.get('/sniff', async (req, res) => {
     const htmlWithBase = epHtml.replace('<head>', '<head><base href="http://hentaimama.io/">');
 
     // Use evaluate to write HTML directly — avoids setContent timeout issues
-    await page.goto('about:blank').catch(() => {});
     await page.evaluate((html) => {
       document.open(); document.write(html); document.close();
     }, htmlWithBase).catch(() => {});
