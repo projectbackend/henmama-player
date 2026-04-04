@@ -82,11 +82,14 @@ app.get('/sniff', async (req, res) => {
     // Fetch HTML via worker, inject <base> tag so relative URLs resolve to hentaimama.io
     const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
     captured.htmlLength = epHtml.length;
-    const htmlWithBase = epHtml.replace('<head>', '<head><base href="http://hentaimama.io/">');
 
-    // Use setContent with long timeout — ignore timeout errors, page still loads
-    await page.setContent(htmlWithBase, { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 2000));
+    // Strip external scripts (they cause timeout), inject jQuery CDN + base tag
+    const htmlCleaned = epHtml
+      .replace('<head>', '<head><base href="http://hentaimama.io/"><script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>')
+      .replace(/<script[^>]+src=["'][^"']*["'][^>]*><\/script>/gi, ''); // remove external scripts
+
+    await page.setContent(htmlCleaned, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 3000));
 
     captured.pageTitle = await page.title().catch(() => '');
     captured.pageUrl = page.url();
