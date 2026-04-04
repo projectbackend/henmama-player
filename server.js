@@ -71,7 +71,7 @@ app.get('/sniff', async (req, res) => {
 
     page.on('response', async response => {
       const url = response.url();
-      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider')) {
+      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider') || url.includes('workers.dev')) {
         try {
           const text = await response.text();
           captured.responses.push({ url: url.slice(0, 150), status: response.status(), body: text.slice(0, 500) });
