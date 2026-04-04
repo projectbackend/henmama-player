@@ -34,116 +34,15 @@ function fetchViaWorker(url) {
   });
 }
 
-// Sniff: goto worker URL directly, intercept admin-ajax
-app.get('/sniff', async (req, res) => {
-  const { epUrl, postId } = req.query;
-  if (!epUrl) return res.status(400).json({ error: 'epUrl required' });
-
-  let page = null;
-  const captured = { requests: [], responses: [], pageTitle: '' };
-
-  try {
-    const b = await getBrowser();
-    page = await b.newPage();
-    await page.setRequestInterception(true);
-
-    page.on('request', r => {
-      const url = r.url();
-      const type = r.resourceType();
-      if (['image', 'font', 'stylesheet', 'media'].includes(type)) return r.abort();
-      if (/juicyads|adserver|magsrv|twinrd|disqus/.test(url)) return r.abort();
-
-      // Log interesting requests
-      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider')) {
-        captured.requests.push({ url: url.slice(0, 200), method: r.method(), postData: r.postData() });
-      }
-
-      // Already going to worker — let it through
-      if (url.includes('workers.dev')) return r.continue().catch(() => r.abort());
-
-      // Route hentaimama requests via worker
-      if (url.includes('hentaimama.io')) {
-        const wUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
-        return r.continue({ url: wUrl }).catch(() => r.abort());
-      }
-      r.continue().catch(() => r.abort());
-    });
-
-    page.on('response', async response => {
-      const url = response.url();
-      if (url.includes('admin-ajax') || url.includes('new2.php') || url.includes('gdvid') || url.includes('javprovider') || url.includes('workers.dev')) {
-        try {
-          const text = await response.text();
-          captured.responses.push({ url: url.slice(0, 150), status: response.status(), body: text.slice(0, 500) });
-        } catch(e) {}
-      }
-    });
-
-    // Fetch HTML via worker, inject <base> tag so relative URLs resolve to hentaimama.io
-    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
-    captured.htmlLength = epHtml.length;
-
-    // Strip external scripts (they cause timeout), inject jQuery CDN + base tag
-    const htmlCleaned = epHtml
-      .replace('<head>', '<head><base href="http://hentaimama.io/"><script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>')
-      .replace(/<script[^>]+src=["'][^"']*["'][^>]*><\/script>/gi, ''); // remove external scripts
-
-    await page.setContent(htmlCleaned, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
-
-    captured.pageTitle = await page.title().catch(() => '');
-    captured.pageUrl = page.url();
-
-    // Wait for scripts to load
-    await new Promise(r => setTimeout(r, 2000));
-
-    // Inject jQuery if not loaded, then manually trigger AJAX
-    // Extract postId from HTML if not provided
-    const pid = postId || epHtml.match(/a:\s*['"](\d+)['"]/)?.[1] || '';
-    captured.postId = pid;
-
-    const ajaxResult = await page.evaluate(async (pid, workerUrl) => {
-      // Inject jQuery if missing
-      if (typeof jQuery === 'undefined') {
-        await new Promise((resolve) => {
-          const s = document.createElement('script');
-          s.src = 'https://code.jquery.com/jquery-3.7.1.min.js';
-          s.onload = resolve;
-          s.onerror = resolve;
-          document.head.appendChild(s);
-        });
-      }
-      if (typeof jQuery === 'undefined') return { error: 'jQuery not available' };
-
-      return new Promise((resolve) => {
-        jQuery.post(
-          workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'),
-          { action: 'get_player_contents', a: pid },
-          (data) => resolve({ data: typeof data === 'string' ? data : JSON.stringify(data) })
-        ).fail((xhr) => resolve({ error: xhr.status + ' ' + xhr.responseText?.slice(0, 100) }));        setTimeout(() => resolve({ timeout: true }), 8000);
-      });
-    }, pid, WORKER_URL).catch(e => ({ error: e.message }));
-
-    captured.ajaxResult = ajaxResult;
-
-    // Wait for any auto-fired AJAX
-    await new Promise(r => setTimeout(r, 3000));
-
-    res.json(captured);
-  } catch(e) {
-    res.status(500).json({ error: e.message, captured });
-  } finally {
-    if (page) await page.close().catch(() => {});
-  }
-});
-
 app.get('/player', async (req, res) => {
   const { postId, epUrl } = req.query;
   if (!postId || !epUrl) return res.status(400).json({ error: 'postId and epUrl required' });
 
   let page = null;
   try {
+    // Fetch HTML via worker (bypasses SSL/IP issues from Railway)
     const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
+
     const b = await getBrowser();
     page = await b.newPage();
     await page.setRequestInterception(true);
@@ -155,7 +54,10 @@ app.get('/player', async (req, res) => {
       if (['image', 'font', 'media', 'stylesheet'].includes(type)) return intercepted.abort();
       if (url.startsWith('data:') || url.startsWith('blob:')) return intercepted.continue();
       if (/juicyads|adserver|magsrv|twinrd|disqus|googlesyndication/.test(url)) return intercepted.abort();
-      if (url.includes('admin-ajax') || url.includes('hentaimama.io')) {
+      // Already going to worker — let through
+      if (url.includes('workers.dev')) return intercepted.continue().catch(() => intercepted.abort());
+      // Route hentaimama requests via worker
+      if (url.includes('hentaimama.io') || url.includes('admin-ajax')) {
         const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
         return intercepted.continue({ url: workerUrl }).catch(() => intercepted.abort());
       }
@@ -175,31 +77,30 @@ app.get('/player', async (req, res) => {
       } catch(e) {}
     });
 
-    await page.setContent(epHtml, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await page.evaluate((url) => { try { history.replaceState({}, '', url); } catch(e) {} }, epUrl).catch(() => {});
+    // Strip external scripts, inject jQuery CDN + base tag to avoid setContent timeout
+    const htmlCleaned = epHtml
+      .replace('<head>', `<head><base href="http://hentaimama.io/"><script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>`)
+      .replace(/<script[^>]+src=["'][^"']*["'][^>]*><\/script>/gi, '');
+
+    await page.setContent(htmlCleaned, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 4000));
 
     if (!playerData) {
+      console.log(`[player] No auto AJAX, trying manual trigger for ${postId}`);
       try {
         const result = await page.evaluate(async (pid, workerUrl) => {
-          if (typeof jQuery !== 'undefined') {
-            return new Promise((resolve) => {
-              jQuery.post(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'),
-                { action: 'get_player_contents', a: pid },
-                (data) => resolve(data)
-              );
-              setTimeout(() => resolve(null), 5000);
-            });
-          }
-          const r = await fetch(workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
-            body: `action=get_player_contents&a=${pid}`
+          if (typeof jQuery === 'undefined') return { error: 'no jQuery' };
+          return new Promise((resolve) => {
+            jQuery.post(
+              `${workerUrl}?url=${encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php')}`,
+              { action: 'get_player_contents', a: pid },
+              (data) => resolve(data)
+            ).fail(() => resolve(null));
+            setTimeout(() => resolve(null), 6000);
           });
-          return r.text();
         }, postId, WORKER_URL);
 
-        if (result) {
+        if (result && result !== '0') {
           try {
             const parsed = typeof result === 'string' ? JSON.parse(result) : result;
             if (Array.isArray(parsed) && parsed.length > 0) playerData = parsed;
