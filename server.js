@@ -40,32 +40,29 @@ app.get('/player', async (req, res) => {
 
   let page = null;
   try {
-    // Fetch the real episode page HTML via Worker
-    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
-
     const b = await getBrowser();
     page = await b.newPage();
 
-    // Route ALL external requests via Worker
+    // Route only non-essential resources via Worker to save bandwidth
     await page.setRequestInterception(true);
     let playerData = null;
 
     page.on('request', r => {
       const url = r.url();
       const type = r.resourceType();
-      if (['image', 'font', 'media'].includes(type)) return r.abort();
+      // Block heavy resources
+      if (['image', 'font', 'media', 'stylesheet'].includes(type)) return r.abort();
       if (url.startsWith('data:') || url.startsWith('about:') || url.startsWith('blob:')) return r.continue();
-      // Route everything through Worker
-      if (!url.includes('workers.dev') && !url.startsWith('data:')) {
-        const workerUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
-        return r.continue({ url: workerUrl }).catch(() => r.abort());
-      }
+      // Let admin-ajax go directly — routing via Worker breaks WordPress session
+      if (url.includes('admin-ajax')) return r.continue();
+      // Block ads/trackers
+      if (url.includes('juicyads') || url.includes('adserver') || url.includes('magsrv') || url.includes('twinrd')) return r.abort();
       r.continue();
     });
 
     page.on('response', async response => {
       const url = response.url();
-      if (!url.includes('admin-ajax') && !url.includes('workers.dev')) return;
+      if (!url.includes('admin-ajax')) return;
       try {
         const text = await response.text();
         const parsed = JSON.parse(text);
@@ -76,25 +73,21 @@ app.get('/player', async (req, res) => {
       } catch(e) {}
     });
 
-    // Set base URL to hentaimama.io so relative URLs and cookies work
-    await page.setContent(epHtml, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    // Navigate directly to the episode page so WordPress session/cookies work properly
+    await page.goto(epUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
 
-    // Give scripts time to execute
-    await new Promise(r => setTimeout(r, 2000));
-
-    // Wait for jQuery AJAX to fire
-    if (!playerData) await new Promise(r => setTimeout(r, 5000));
+    // Wait for jQuery AJAX to fire automatically
+    await new Promise(r => setTimeout(r, 5000));
 
     if (!playerData) {
       console.log(`[player] No data after page load, trying manual trigger for ${postId}`);
-      // Try manual jQuery AJAX trigger
       try {
         await page.evaluate((pid) => {
           if (typeof jQuery !== 'undefined') {
             jQuery.post('/wp-admin/admin-ajax.php', { action: 'get_player_contents', a: pid });
           }
         }, postId);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
       } catch(e) {}
     }
 
