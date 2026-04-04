@@ -58,6 +58,9 @@ app.get('/sniff', async (req, res) => {
         captured.requests.push({ url: url.slice(0, 200), method: r.method(), postData: r.postData() });
       }
 
+      // Already going to worker — let it through
+      if (url.includes('workers.dev')) return r.continue().catch(() => r.abort());
+
       // Route hentaimama requests via worker
       if (url.includes('hentaimama.io')) {
         const wUrl = `${WORKER_URL}?url=${encodeURIComponent(url.replace('https://', 'http://'))}`;
@@ -113,8 +116,7 @@ app.get('/sniff', async (req, res) => {
           workerUrl + '?url=' + encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php'),
           { action: 'get_player_contents', a: pid },
           (data) => resolve({ data: typeof data === 'string' ? data : JSON.stringify(data) })
-        ).fail((xhr) => resolve({ error: xhr.status + ' ' + xhr.responseText?.slice(0, 100) }));
-        setTimeout(() => resolve({ timeout: true }), 8000);
+        ).fail((xhr) => resolve({ error: xhr.status + ' ' + xhr.responseText?.slice(0, 100) }));        setTimeout(() => resolve({ timeout: true }), 8000);
       });
     }, pid, WORKER_URL).catch(e => ({ error: e.message }));
 
