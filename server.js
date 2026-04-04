@@ -160,6 +160,55 @@ app.get('/player', async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/debug', async (req, res) => {
+  const { postId, epUrl } = req.query;
+  if (!postId || !epUrl) return res.status(400).json({ error: 'postId and epUrl required' });
+
+  try {
+    const epHtml = await fetchViaWorker(epUrl.replace('https://', 'http://'));
+    
+    // Test AJAX directly via worker
+    const ajaxUrl = `${WORKER_URL}?url=${encodeURIComponent('http://hentaimama.io/wp-admin/admin-ajax.php')}`;
+    const result = await new Promise((resolve, reject) => {
+      const https = require('https');
+      const body = `action=get_player_contents&a=${postId}`;
+      const urlObj = new URL(ajaxUrl);
+      const options = {
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': epUrl,
+          'Origin': 'http://hentaimama.io',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      };
+      const req2 = https.request(options, r => {
+        let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d));
+      });
+      req2.on('error', reject);
+      req2.write(body);
+      req2.end();
+    });
+
+    // Extract nonce from HTML
+    const nonceMatch = epHtml.match(/"nonce"\s*:\s*"([a-f0-9]+)"/g);
+    const scriptMatch = epHtml.match(/a:'(\d+)'/);
+    
+    res.json({
+      ajaxResult: result.slice(0, 200),
+      nonces: nonceMatch,
+      postIdInHtml: scriptMatch?.[1],
+      htmlLength: epHtml.length
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.listen(PORT, () => console.log(`Player service on port ${PORT}`));
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
